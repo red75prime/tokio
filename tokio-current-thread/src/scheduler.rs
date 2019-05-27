@@ -5,6 +5,7 @@ use tokio_executor::Enter;
 use futures::executor::{self, NotifyHandle, Spawn, UnsafeNotify};
 use futures::{Async, Future};
 
+use std::borrow::Cow;
 use std::cell::{UnsafeCell, RefCell, Cell};
 use std::collections::HashMap;
 use std::fmt::{self, Debug};
@@ -348,7 +349,7 @@ where
 
 #[derive(Debug, Clone)]
 pub struct Stat {
-    name: &'static str,
+    name: Cow<'static, str>,
     poll_count: usize,
     total_duration: Duration,
 }
@@ -356,16 +357,16 @@ pub struct Stat {
 #[derive(Default)]
 struct NamesAndStats {
     stats: Vec<Stat>,
-    names: HashMap<&'static str, usize>,
+    names: HashMap<Cow<'static, str>, usize>,
 }
 
 thread_local! {
     static STATS: RefCell<NamesAndStats> = RefCell::new(Default::default());
-    static CURRENT_NAME: Cell<&'static str> = Cell::new("");
+    static CURRENT_NAME: Cell<Cow<'static, str>> = Cell::new("".into());
 }
 
 /// Sets task name to be assigned to the next spawned task
-pub fn set_task_name(name: &'static str) {
+pub fn set_task_name(name: Cow<'static, str>) {
     CURRENT_NAME.with(|c| c.set(name));
 }
 
@@ -401,15 +402,19 @@ impl<'a, U: Unpark> Scheduled<'a, U> {
 
 impl Task {
     pub fn new(future: Box<Future<Item = (), Error = ()> + 'static>) -> Self {
-        let current_name = CURRENT_NAME.with(|c| c.get() );
+        let current_name = CURRENT_NAME.with(|c| {
+            let name = c.replace("".into());
+            c.set(name.clone());
+            name
+        });
         let idx = STATS.with(|stats| {
             let mut stats = stats.borrow_mut();
-            if let Some(&idx) = stats.names.get(current_name) {
+            if let Some(&idx) = stats.names.get(&current_name) {
                 idx
             } else {
                 let idx = stats.stats.len();
                 stats.stats.push(Stat {
-                    name: current_name,
+                    name: current_name.clone(),
                     poll_count: 0,
                     total_duration: Duration::from_secs(0),
                 });
