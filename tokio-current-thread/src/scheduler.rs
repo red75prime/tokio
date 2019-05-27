@@ -5,7 +5,8 @@ use tokio_executor::Enter;
 use futures::executor::{self, NotifyHandle, Spawn, UnsafeNotify};
 use futures::{Async, Future};
 
-use std::cell::UnsafeCell;
+use std::cell::{UnsafeCell, RefCell, Cell};
+use std::collections::HashMap;
 use std::fmt::{self, Debug};
 use std::marker::PhantomData;
 use std::mem;
@@ -14,6 +15,7 @@ use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release, SeqCst};
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize};
 use std::sync::{Arc, Weak};
 use std::thread;
+use std::time::{Instant, Duration};
 use std::usize;
 
 /// A generic task-aware scheduler.
@@ -125,7 +127,7 @@ enum Dequeue<U> {
 }
 
 /// Wraps a spawned boxed future
-struct Task(Spawn<Box<Future<Item = (), Error = ()>>>);
+struct Task(Spawn<Box<Future<Item = (), Error = ()>>>, usize);
 
 /// A task that is scheduled. `turn` must be called
 pub struct Scheduled<'a, U: 'a> {
@@ -344,14 +346,53 @@ where
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct Stat {
+    name: &'static str,
+    poll_count: usize,
+    total_duration: Duration,
+}
+
+#[derive(Default)]
+struct NamesAndStats {
+    stats: Vec<Stat>,
+    names: HashMap<&'static str, usize>,
+}
+
+thread_local! {
+    static STATS: RefCell<NamesAndStats> = RefCell::new(Default::default());
+    static CURRENT_NAME: Cell<&'static str> = Cell::new("");
+}
+
+/// Sets task name to be assigned to the next spawned task
+pub fn set_task_name(name: &'static str) {
+    CURRENT_NAME.with(|c| c.set(name));
+}
+
+/// Task execution stats
+pub fn stats() -> Vec<Stat> {
+    STATS.with(|stats| {
+        let stats = stats.borrow();
+        stats.stats.clone()
+    })
+}
+
 impl<'a, U: Unpark> Scheduled<'a, U> {
     /// Polls the task, returns `true` if the task has completed.
     pub fn tick(&mut self) -> bool {
         // Tick the future
+        let start = Instant::now();
         let ret = match self.task.0.poll_future_notify(self.notify, 0) {
             Ok(Async::Ready(_)) | Err(_) => true,
             Ok(Async::NotReady) => false,
         };
+        let idx = self.task.1;
+        STATS.with(|stats| {
+            let mut stats = stats.borrow_mut();
+            let stat = &mut stats.stats[idx];
+            stat.total_duration += start.elapsed();
+            stat.poll_count += 1;
+        });
 
         *self.done = ret;
         ret
@@ -360,7 +401,23 @@ impl<'a, U: Unpark> Scheduled<'a, U> {
 
 impl Task {
     pub fn new(future: Box<Future<Item = (), Error = ()> + 'static>) -> Self {
-        Task(executor::spawn(future))
+        let current_name = CURRENT_NAME.with(|c| c.get() );
+        let idx = STATS.with(|stats| {
+            let mut stats = stats.borrow_mut();
+            if let Some(&idx) = stats.names.get(current_name) {
+                idx
+            } else {
+                let idx = stats.stats.len();
+                stats.stats.push(Stat {
+                    name: current_name,
+                    poll_count: 0,
+                    total_duration: Duration::from_secs(0),
+                });
+                stats.names.insert(current_name, idx);
+                idx
+            }
+        });
+        Task(executor::spawn(future), idx)
     }
 }
 

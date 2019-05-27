@@ -31,6 +31,7 @@ extern crate tokio_executor;
 mod scheduler;
 
 use self::scheduler::Scheduler;
+pub use self::scheduler::{set_task_name, stats};
 
 use tokio_executor::park::{Park, ParkThread, Unpark};
 use tokio_executor::{Enter, SpawnError};
