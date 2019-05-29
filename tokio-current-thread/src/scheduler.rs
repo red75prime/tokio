@@ -349,9 +349,9 @@ where
 
 #[derive(Debug, Clone)]
 pub struct Stat {
-    name: Cow<'static, str>,
-    poll_count: usize,
-    total_duration: Duration,
+    pub name: Cow<'static, str>,
+    pub poll_count: usize,
+    pub total_duration: Duration,
 }
 
 #[derive(Default)]
