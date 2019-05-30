@@ -16,7 +16,6 @@ use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release, SeqCst};
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize};
 use std::sync::{Arc, Weak};
 use std::thread;
-use std::time::{Instant, Duration};
 use std::usize;
 
 /// A generic task-aware scheduler.
@@ -347,16 +346,32 @@ where
     }
 }
 
+/// Task execution stats
 #[derive(Debug, Clone)]
 pub struct Stat {
+    /// Task name
     pub name: Cow<'static, str>,
+    /// Total poll count
     pub poll_count: usize,
-    pub total_duration: Duration,
+    /// Total poll execution duration in microseconds
+    pub total_duration_us: u64,
+}
+
+/// Tasks' execution stats
+#[derive(Debug, Clone, Default)]
+pub struct Stats {
+    /// Tasks' stats
+    pub tasks: Vec<Stat>,
+    /// Thread execution time
+    pub total_time_us: u64,
+    /// M
+    pub monitoring_overhead_us: u64,
 }
 
 #[derive(Default)]
 struct NamesAndStats {
-    stats: Vec<Stat>,
+    stats: Stats,
+    start_moment_us: u64,
     names: HashMap<Cow<'static, str>, usize>,
 }
 
@@ -371,7 +386,7 @@ pub fn set_task_name(name: Cow<'static, str>) {
 }
 
 /// Task execution stats
-pub fn stats() -> Vec<Stat> {
+pub fn stats() -> Stats {
     STATS.with(|stats| {
         let stats = stats.borrow();
         stats.stats.clone()
@@ -382,17 +397,22 @@ impl<'a, U: Unpark> Scheduled<'a, U> {
     /// Polls the task, returns `true` if the task has completed.
     pub fn tick(&mut self) -> bool {
         // Tick the future
-        let start = Instant::now();
+        let start = super::thread_time_us();
         let ret = match self.task.0.poll_future_notify(self.notify, 0) {
             Ok(Async::Ready(_)) | Err(_) => true,
             Ok(Async::NotReady) => false,
         };
+        let cur_us = super::thread_time_us();
         let idx = self.task.1;
         STATS.with(|stats| {
             let mut stats = stats.borrow_mut();
-            let stat = &mut stats.stats[idx];
-            stat.total_duration += start.elapsed();
-            stat.poll_count += 1;
+            {
+                let stat = &mut stats.stats.tasks[idx];
+                stat.total_duration_us += cur_us - start;
+                stat.poll_count += 1;
+            }
+            stats.stats.total_time_us = cur_us - stats.start_moment_us;
+            stats.stats.monitoring_overhead_us += super::thread_time_us() - cur_us;
         });
 
         *self.done = ret;
@@ -407,18 +427,23 @@ impl Task {
             c.set(name.clone());
             name
         });
+        let start_us = super::thread_time_us();
         let idx = STATS.with(|stats| {
             let mut stats = stats.borrow_mut();
+            if stats.start_moment_us == 0 {
+                stats.start_moment_us = super::thread_time_us();
+            }
             if let Some(&idx) = stats.names.get(&current_name) {
                 idx
             } else {
-                let idx = stats.stats.len();
-                stats.stats.push(Stat {
+                let idx = stats.stats.tasks.len();
+                stats.stats.tasks.push(Stat {
                     name: current_name.clone(),
                     poll_count: 0,
-                    total_duration: Duration::from_secs(0),
+                    total_duration_us: 0,
                 });
                 stats.names.insert(current_name, idx);
+                stats.stats.monitoring_overhead_us += super::thread_time_us() - start_us;
                 idx
             }
         });

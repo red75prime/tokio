@@ -26,12 +26,13 @@
 //! [executor module]: https://docs.rs/tokio/0.1/tokio/executor/index.html
 
 extern crate futures;
+extern crate libc;
 extern crate tokio_executor;
 
 mod scheduler;
 
 use self::scheduler::Scheduler;
-pub use self::scheduler::{set_task_name, stats, Stat};
+pub use self::scheduler::{set_task_name, stats, Stat, Stats};
 
 use tokio_executor::park::{Park, ParkThread, Unpark};
 use tokio_executor::{Enter, SpawnError};
@@ -863,5 +864,20 @@ impl<T> BlockError<T> {
 impl<T> From<tokio_executor::EnterError> for BlockError<T> {
     fn from(_: tokio_executor::EnterError) -> Self {
         BlockError { inner: None }
+    }
+}
+
+fn thread_time_us() -> u64 {
+    use libc;
+    use std::mem;
+
+    let mut ts: libc::timespec = unsafe { mem::zeroed() };
+    unsafe {
+        let res = libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts);
+        if res !=0 {
+            eprintln!("clock_gettime error {}", res);
+            return 0;
+        };
+        (ts.tv_sec * 1_000_000 + ts.tv_nsec/1_000) as u64
     }
 }
